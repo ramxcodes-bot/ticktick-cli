@@ -217,7 +217,26 @@ class TickTickAPI {
 
   // Projects
   async listProjects(): Promise<Project[]> {
-    return this.request<Project[]>("/project");
+    const projects = await this.request<Project[]>("/project");
+    // GET /project omits the Inbox. Add a synthetic entry so task search,
+    // listing, and move cover quick-added tasks living in the Inbox.
+    if (!projects.some((p) => p.kind === "INBOX" || /^inbox/i.test(p.id) || p.name.toLowerCase() === "inbox")) {
+      projects.push({ id: "inbox", name: "Inbox", kind: "INBOX" });
+    }
+    return projects;
+  }
+
+  // Real Inbox project id (e.g. "inbox128572243"). Cached after first fetch.
+  private inboxIdCache: string | null = null;
+
+  async getInboxId(): Promise<string> {
+    if (this.inboxIdCache) return this.inboxIdCache;
+    const data = await this.request<{ tasks: Array<{ projectId: string }> }>(
+      "/project/inbox/data"
+    );
+    const id = data.tasks?.[0]?.projectId;
+    this.inboxIdCache = id || "inbox";
+    return this.inboxIdCache;
   }
 
   async createProject(input: CreateProjectInput): Promise<Project> {
@@ -235,6 +254,10 @@ class TickTickAPI {
   }
 
   async getProjectData(projectId: string): Promise<ProjectData> {
+    // The synthetic "inbox" id from listProjects() routes to the special endpoint.
+    if (projectId === "inbox") {
+      return this.request<ProjectData>("/project/inbox/data");
+    }
     return this.request<ProjectData>(`/project/${projectId}/data`);
   }
 
@@ -387,10 +410,22 @@ class TickTickAPI {
 
   // Move task to different project (by updating projectId)
   async moveTask(taskId: string, fromProjectId: string, toProjectId: string): Promise<Task> {
-    return this.request<Task>(`/task/${taskId}`, {
-      method: "POST",
-      body: JSON.stringify({ id: taskId, projectId: toProjectId }),
-    });
+    // POST /task/{id} silently ignores projectId changes (returns 200, moves
+    // nothing). The dedicated move endpoint requires an ARRAY body — a single
+    // object returns HTTP 500 unknown_exception.
+    // Endpoint returns [{id, etag, etimestamp, ...}] without full task fields;
+    // callers merge with their known task copy if they need the full object.
+    const results = await this.request<Task[]>(
+      "/task/move",
+      {
+        method: "POST",
+        body: JSON.stringify([
+          { fromProjectId, toProjectId, taskId },
+        ]),
+      }
+    );
+    const summary = Array.isArray(results) ? results[0] : undefined;
+    return (summary || { id: taskId }) as Task;
   }
 
   // Utility functions
@@ -414,7 +449,9 @@ class TickTickAPI {
         const data = await this.getProjectData(project.id);
         const task = data.tasks?.find((t) => t.id === taskId);
         if (task) {
-          return { task, projectId: project.id };
+          // Return the task's real projectId (e.g. "inbox128572243"), not the
+          // synthetic "inbox" id, so complete/move calls hit valid endpoints.
+          return { task, projectId: task.projectId || project.id };
         }
       } catch {
         // Project might not have tasks accessible
@@ -446,7 +483,9 @@ class TickTickAPI {
         ) || [];
 
         for (const task of matchingTasks) {
-          matches.push({ task, projectId: project.id, projectName: project.name });
+          // Prefer the task's real projectId (e.g. "inbox128572243") over the
+          // synthetic "inbox" id so complete/move calls hit valid endpoints.
+          matches.push({ task, projectId: task.projectId || project.id, projectName: project.name });
         }
       } catch {
         // Project might not have tasks accessible

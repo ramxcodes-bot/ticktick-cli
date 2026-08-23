@@ -70,7 +70,8 @@ export async function moveCommand(
     }
 
     // Move the task
-    const movedTask = await api.moveTask(task.id, fromProjectId, targetProject.id);
+    const movedSummary = await api.moveTask(task.id, fromProjectId, targetProject.id);
+    const movedTask = { ...task, ...movedSummary, projectId: targetProject.id };
 
     if (options.json) {
       console.log(JSON.stringify(movedTask, null, 2));
